@@ -9,7 +9,7 @@ class SliceSampling(pm.StepMethod):
     def __init__(self, stochastic, width = 0.5, maxiter = 200, verbose=None, tally=True,):
         """
         Input:
-            stochistic - stochastic node
+            stochastic - stochastic node
             width - the initial width of the interval
             maxiter - maximum number of iteration allowed for stepping-out and shrinking
         """
@@ -45,7 +45,7 @@ class SliceSampling(pm.StepMethod):
         #step out to the left
         iter = 0
         stoch.value = xl
-        while (self.logp_plus_loglike > z) and (iter < self.maxiter):
+        while (self.get_logp() >= z) and (iter < self.maxiter):
             xl -= self.width
             stoch.value = xl
             iter += 1
@@ -58,10 +58,10 @@ class SliceSampling(pm.StepMethod):
         #step out to the right
         iter = 0
         stoch.value = xr
-        while (self.logp_plus_loglike > z) and (iter < self.maxiter):
-            xr += self.width
-            stoch.value = xr
-            iter += 1
+        while (self.get_logp() >= z) and (iter < self.maxiter):
+                xr += self.width
+                stoch.value = xr
+                iter += 1
 
         assert iter < self.maxiter, "Step-out procedure failed"
         self.neval += iter
@@ -74,7 +74,7 @@ class SliceSampling(pm.StepMethod):
 
         #if the point is outside the interval than shrink it and draw again
         iter = 0
-        while(self.logp_plus_loglike < z) and (iter < self.maxiter):
+        while(self.get_logp() < z) and (iter < self.maxiter):
             if (xp > value):
                 xr = xp
             else:
@@ -87,4 +87,13 @@ class SliceSampling(pm.StepMethod):
         self.neval += iter
         if self.verbose>2:
             print 'after %d iteration found new value: %.3f' % (iter, xp)
+
+
+    def get_logp(self):
+        try:
+            return self.logp_plus_loglike
+        except pm.ZeroProbability:
+            return -np.inf
+
+
 

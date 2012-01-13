@@ -1,6 +1,7 @@
  #!/usr/bin/python
 from __future__ import division
-from copy import copy
+from copy import copy, deepcopy
+from matplotlib.mlab import rec_drop_fields
 
 import numpy as np
 import numpy.lib.recfunctions as rec
@@ -14,8 +15,6 @@ import pymc as pm
 import warnings
 
 import kabuki
-from copy import copy, deepcopy
-from matplotlib.mlab import rec_drop_fields
 
 
 class Parameter(object):
@@ -171,7 +170,8 @@ class Hierarchical(object):
     """
 
     def __init__(self, data, is_group_model=None, depends_on=None, trace_subjs=True,
-                 plot_subjs=False, plot_var=False, include=(), replace_params = None):
+                 plot_subjs=False, plot_var=False, include=(), replace_params = None,
+                 slice_sampling = False):
         # Init
         self.include = set(include)
 
@@ -180,6 +180,7 @@ class Hierarchical(object):
         self.trace_subjs = trace_subjs
         self.plot_subjs = plot_subjs
         self.plot_var = plot_var
+        self.slice_sampling = slice_sampling
 
         # Add data_idx field to data. Since we are restructuring the
         # data, this provides a means of getting the data out of
@@ -475,6 +476,12 @@ class Hierarchical(object):
             self.create_nodes()
 
         self.mc = pm.MCMC(self.nodes, *args, **kwargs)
+
+        if self.slice_sampling:
+            nodes = self.var_nodes.values()
+            nodes += self.group_nodes.values()
+            for node in nodes:
+                self.mc.use_step_method(kabuki.slice.SliceSampling, node)
 
         return self.mc
 
@@ -880,12 +887,13 @@ class Hierarchical(object):
                 step_pre_node = pre_model.mc.step_method_dict[pre_node][0]
                 pre_sd = step_pre_node.proposal_sd * step_pre_node.adaptive_scale_factor
                 if type(step_pre_node) == pm.Metropolis:
-                    self.mc.use_step_method(pm.Metropolis(all_nodes[i_node],
-                                                          proposal_sd = pre_sd))
+                    self.mc.use_step_method(pm.Metropolis, all_nodes[i_node],
+                                            proposal_sd = pre_sd)
                     assigned_steps += 1
 
         print "assigned values to %d nodes (out of %d)." % (assigned_values, len(all_nodes))
         if step_method:
+            asdas
             print "assigned step methods to %d (out of %d)." % (assigned_steps, len(all_nodes))
 
     def plot_posteriors(self):
