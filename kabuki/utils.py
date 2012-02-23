@@ -2,7 +2,8 @@ from __future__ import division
 import numpy as np
 import matplotlib.pyplot as plt
 import pymc as pm
-
+from copy import copy, deepcopy
+import sys
 import kabuki
 
 def interpolate_trace(x, trace, range=(-1,1), bins=100):
@@ -171,7 +172,6 @@ def parse_config_file(fname, mcmc=False, load=False, param_names=None):
 
 
     print "Creating model..."
-    m = hddm.models.Multi(data, model_type=model_type, is_subj_model=is_subj_model, no_bias=no_bias, depends_on=depends, debug=debug)
 
     if mcmc:
         if not load:
@@ -193,32 +193,184 @@ def parse_config_file(fname, mcmc=False, load=False, param_names=None):
 
     return m
 
-def posterior_predictive_check(model, data):
-    params = copy(model.params_est)
-    if model.model_type.startswith('simple'):
-        params['sv'] = 0
-        params['sz'] = 0
-        params['ster'] = 0
-    if model.no_bias:
-        params['z'] = params['a']/2.
-
-    data_sampled = _gen_rts_params(params)
-
-    # Check
-    return pm.discrepancy(data_sampled, data, .5)
-
-def load_traces_from_db(mc, dbname):
-    """Load samples from a database created by an earlier model
+def scipy_stochastic(scipy_dist, **kwargs):
     """
-    # Open database
-    db = pm.database.hdf5.load(dbname)
+    Return a Stochastic subclass made from a particular SciPy distribution.
+    """
+    import inspect
+    import scipy.stats.distributions as sc_dst
+    from pymc.ScipyDistributions import separate_shape_args
+    from pymc.distributions import new_dist_class, bind_size
 
-    # Loop through parameters and set traces
-    for node in mc.nodes:
-        #loop only not-observed
-        if node.observed:
-            continue
-        node.trace = db.trace(node.__name__)
+    if scipy_dist.__class__.__name__.find('_gen'):
+        scipy_dist = scipy_dist(**kwargs)
+
+    name = scipy_dist.__class__.__name__.replace('_gen','').capitalize()
+
+    (args, varargs, varkw, defaults) = inspect.getargspec(scipy_dist._pdf)
+
+    shape_args = args[2:]
+    if isinstance(scipy_dist, sc_dst.rv_continuous):
+        dtype=float
+
+        def logp(value, **kwds):
+            args, zkwds = separate_shape_args(kwds, shape_args)
+            if hasattr(scipy_dist, '_logp'):
+                return scipy_dist._logp(value, *args)
+            else:
+                return np.sum(scipy_dist.logpdf(value,*args,**kwds))
+
+        parent_names = shape_args + ['loc', 'scale']
+        defaults = [None] * (len(parent_names)-2) + [0., 1.]
+
+    elif isinstance(scipy_dist, sc_dst.rv_discrete):
+        dtype=int
+
+        def logp(value, **kwds):
+            args, kwds = separate_shape_args(kwds, shape_args)
+            if hasattr(scipy_dist, '_logp'):
+                return scipy_dist._logp(value, *args)
+            else:
+                return np.sum(scipy_dist.logpmf(value,*args,**kwds))
+
+        parent_names = shape_args + ['loc']
+        defaults = [None] * (len(parent_names)-1) + [0]
+    else:
+        return None
+
+    parents_default = dict(zip(parent_names, defaults))
+
+    def random(shape=None, **kwds):
+        args, kwds = separate_shape_args(kwds, shape_args)
+
+        if shape is None:
+            return scipy_dist.rvs(*args, **kwds)
+        else:
+            return np.reshape(scipy_dist.rvs(*args, **kwds), shape)
+
+    # Build docstring from distribution
+    docstr = name[0]+' = '+name + '(name, '+', '.join(parent_names)+', value=None, shape=None, trace=True, rseed=True, doc=None)\n\n'
+    docstr += 'Stochastic variable with '+name+' distribution.\nParents are: '+', '.join(parent_names) + '.\n\n'
+    docstr += """
+Methods:
+
+    random()
+        - draws random value
+          sets value to return value
+
+    ppf(q)
+        - percent point function (inverse of cdf --- percentiles)
+          sets value to return value
+
+    isf(q)
+        - inverse survival function (inverse of sf)
+          sets value to return value
+
+    stats(moments='mv')
+        - mean('m',axis=0), variance('v'), skew('s'), and/or kurtosis('k')
+
+
+Attributes:
+
+    logp
+        - sum(log(pdf())) or sum(log(pmf()))
+
+    cdf
+        - cumulative distribution function
+
+    sf
+        - survival function (1-cdf --- sometimes more accurate)
+
+    entropy
+        - (differential) entropy of the RV.
+
+
+NOTE: If you encounter difficulties with this object, please try the analogous
+computation using the rv objects in scipy.stats.distributions directly before
+reporting the bug.
+    """
+
+    new_class = new_dist_class(dtype, name, parent_names, parents_default, docstr, logp, random, True, None)
+    class newer_class(new_class):
+        __doc__ = docstr
+        rv = scipy_dist
+        rv.random = random
+
+        def __init__(self, *args, **kwds):
+            new_class.__init__(self, *args, **kwds)
+            self.args, self.kwds = separate_shape_args(self.parents, shape_args)
+            self.frozen_rv = self.rv(self.args, self.kwds)
+            self._random = bind_size(self._random, self.shape)
+
+        def _pymc_dists_to_value(self, args):
+            """Replace arguments that are a pymc.Node with their value."""
+            # This is needed because the scipy rv function transforms
+            # every input argument which causes new pymc lambda
+            # functions to be generated. Thus, when calling this many
+            # many times, excessive amounts of RAM are used.
+            new_args = []
+            for arg in args:
+                if isinstance(arg, pm.Node):
+                    new_args.append(arg.value)
+                else:
+                    new_args.append(arg)
+
+            return new_args
+
+        def pdf(self, value=None):
+            """
+            The probability distribution function of self conditional on parents
+            evaluated at self's current value
+            """
+            if value is None:
+                value = self.value
+            return self.rv.pdf(value, *self._pymc_dists_to_value(self.args), **self.kwds)
+
+        def cdf(self, value=None):
+            """
+            The cumulative distribution function of self conditional on parents
+            evaluated at self's current value
+            """
+            if value is None:
+                value = self.value
+            return self.rv.cdf(value, *self._pymc_dists_to_value(self.args), **self.kwds)
+
+        def sf(self, value=None):
+            """
+            The survival function of self conditional on parents
+            evaluated at self's current value
+            """
+            if value is None:
+                value = self.value
+            return self.rv.sf(self.value, *self._pymc_dists_to_value(self.args), **self.kwds)
+
+        def ppf(self, q):
+            """
+            The percentile point function (inverse cdf) of self conditional on parents.
+            Self's value will be set to the return value.
+            """
+            self.value = self.rv.ppf(q, *self._pymc_dists_to_value(self.args), **self.kwds)
+            return self.value
+
+        def isf(self, q):
+            """
+            The inverse survival function of self conditional on parents.
+            Self's value will be set to the return value.
+            """
+            self.value = self.rv.isf(q, *self._pymc_dists_to_value(self.args), **self.kwds)
+            return self.value
+
+        def stats(self, moments='mv'):
+            """The first few moments of self's distribution conditional on parents"""
+            return self.rv.stats(moments=moments, *self._pymc_dists_to_value(self.args), **self.kwds)
+
+        def _entropy(self):
+            """The entropy of self's distribution conditional on its parents"""
+            return self.rv.entropy(*self._pymc_dists_to_value(self.args), **self.kwds)
+        entropy = property(_entropy, doc=_entropy.__doc__)
+
+    newer_class.__name__ = new_class.__name__
+    return newer_class
 
 def set_proposal_sd(mc, tau=.1):
     for var in mc.variables:
@@ -228,20 +380,116 @@ def set_proposal_sd(mc, tau=.1):
 
     return
 
-def centered_half_cauchy_rand(S, size):
-    """sample from a half Cauchy distribution with scale S"""
-    return abs(S * np.tan(np.pi * pm.random_number(size) - np.pi/2.0))
 
-def centered_half_cauchy_logp(x, S):
-    """logp of half Cauchy with scale S"""
-    x = np.atleast_1d(x)
-    if sum(x<0): return -np.inf
-    return pm.flib.cauchy(x, 0, S) + len(x) * np.log(2)
+###########################################################################
+# The following code is directly copied from Twisted:
+# http://twistedmatrix.com/trac/browser/tags/releases/twisted-11.1.0/twisted/python/reflect.py
+# For the license see:
+# http://twistedmatrix.com/trac/browser/trunk/LICENSE
+###########################################################################
 
-HalfCauchy = pm.stochastic_from_dist(name="Half Cauchy",
-                                     random=centered_half_cauchy_rand,
-                                     logp=centered_half_cauchy_logp,
-                                     dtype=np.double)
+class _NoModuleFound(Exception):
+    """
+    No module was found because none exists.
+    """
+
+def _importAndCheckStack(importName):
+    """
+    Import the given name as a module, then walk the stack to determine whether
+    the failure was the module not existing, or some code in the module (for
+    example a dependent import) failing.  This can be helpful to determine
+    whether any actual application code was run.  For example, to distiguish
+    administrative error (entering the wrong module name), from programmer
+    error (writing buggy code in a module that fails to import).
+
+    @raise Exception: if something bad happens.  This can be any type of
+    exception, since nobody knows what loading some arbitrary code might do.
+
+    @raise _NoModuleFound: if no module was found.
+    """
+    try:
+        try:
+            return __import__(importName)
+        except ImportError:
+            excType, excValue, excTraceback = sys.exc_info()
+            while excTraceback:
+                execName = excTraceback.tb_frame.f_globals["__name__"]
+                if (execName is None or # python 2.4+, post-cleanup
+                    execName == importName): # python 2.3, no cleanup
+                    raise excType, excValue, excTraceback
+                excTraceback = excTraceback.tb_next
+            raise _NoModuleFound()
+    except:
+        # Necessary for cleaning up modules in 2.3.
+        sys.modules.pop(importName, None)
+        raise
+
+def find_object(name):
+    """
+    Retrieve a Python object by its fully qualified name from the global Python
+    module namespace.  The first part of the name, that describes a module,
+    will be discovered and imported.  Each subsequent part of the name is
+    treated as the name of an attribute of the object specified by all of the
+    name which came before it.  For example, the fully-qualified name of this
+    object is 'twisted.python.reflect.namedAny'.
+
+    @type name: L{str}
+    @param name: The name of the object to return.
+
+    @raise InvalidName: If the name is an empty string, starts or ends with
+        a '.', or is otherwise syntactically incorrect.
+
+    @raise ModuleNotFound: If the name is syntactically correct but the
+        module it specifies cannot be imported because it does not appear to
+        exist.
+
+    @raise ObjectNotFound: If the name is syntactically correct, includes at
+        least one '.', but the module it specifies cannot be imported because
+        it does not appear to exist.
+
+    @raise AttributeError: If an attribute of an object along the way cannot be
+        accessed, or a module along the way is not found.
+
+    @return: the Python object identified by 'name'.
+    """
+
+    if not name:
+        raise InvalidName('Empty module name')
+
+    names = name.split('.')
+
+    # if the name starts or ends with a '.' or contains '..', the __import__
+    # will raise an 'Empty module name' error. This will provide a better error
+    # message.
+    if '' in names:
+        raise InvalidName(
+            "name must be a string giving a '.'-separated list of Python "
+            "identifiers, not %r" % (name,))
+
+    topLevelPackage = None
+    moduleNames = names[:]
+    while not topLevelPackage:
+        if moduleNames:
+            trialname = '.'.join(moduleNames)
+            try:
+                topLevelPackage = _importAndCheckStack(trialname)
+            except _NoModuleFound:
+                moduleNames.pop()
+        else:
+            if len(names) == 1:
+                raise ModuleNotFound("No module named %r" % (name,))
+            else:
+                raise ObjectNotFound('%r does not name an object' % (name,))
+
+    obj = topLevelPackage
+    for n in names[1:]:
+        obj = getattr(obj, n)
+
+    return obj
+
+######################
+# END OF COPIED CODE #
+######################
 
 if __name__ == "__main__":
     import doctest

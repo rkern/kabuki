@@ -27,7 +27,7 @@ class Knode(object):
             self.step_method_args = {}
 
 
-class Parameter(object):
+class HNode(pm.Node):
     """Specify a parameter of a model.
 
     :Arguments:
@@ -225,13 +225,6 @@ class Hierarchical(object):
         # data, this provides a means of getting the data out of
         # kabuki and sorting to according to data_idx to get the
         # original order.
-        assert('data_idx' not in data.dtype.names),'A field named data_idx was found in the data file, please change it.'
-        new_dtype = data.dtype.descr + [('data_idx', '<i8')]
-        new_data = np.empty(data.shape, dtype=new_dtype)
-        for field in data.dtype.fields:
-            new_data[field] = data[field]
-        new_data['data_idx'] = np.arange(len(data))
-        data = new_data
         self.data = data
 
         if not depends_on:
@@ -296,12 +289,12 @@ class Hierarchical(object):
             if param.is_bottom_node:
                 param.has_subj_nodes = True
                 continue
-            if not trace_subjs and param.has_subj_nodes:
-                param.subj_knode.args['trace'] = False
-            if not plot_subjs and param.has_subj_nodes:
-                param.subj_knode.args['plot'] = False
-            if not plot_var and param.has_var_nodes:
-                param.var_knode.args['plot'] = False
+            # if not trace_subjs and param.has_subj_nodes:
+            #     param.subj_knode.args['trace'] = False
+            # if not plot_subjs and param.has_subj_nodes:
+            #     param.subj_knode.args['plot'] = False
+            # if not plot_var and param.has_var_nodes:
+            #     param.var_knode.args['plot'] = False
 
         #set params_dict
         self.params_dict = {}
@@ -313,7 +306,7 @@ class Hierarchical(object):
     def _change_default_params(self, replace_params, update_params):
         """replace/update parameters with user defined parameters"""
         #replace params
-        if type(replace_params)==Parameter:
+        if type(replace_params)==HNode:
             replace_params = [replace_params]
         for new_param in replace_params:
             for i in range(len(self.params)):
@@ -501,16 +494,16 @@ class Hierarchical(object):
                 self.var_nodes[name+tag] = node
 
         #update knodes
-        for name, param in self.params_include.iteritems():
-            if param.is_bottom_node:
-                continue
-            param.knodes['group'].nodes = param.group_nodes
-            #try to update var knodes and subj knodes if they exist
-            try:
-                param.knodes['var'].nodes = param.var_nodes
-                param.knodes['subj'].nodes = param.subj_nodes
-            except AttributeError:
-                pass
+        # for name, param in self.params_include.iteritems():
+        #     if param.is_bottom_node:
+        #         continue
+        #     param.knodes['group'].nodes = param.group_nodes
+        #     #try to update var knodes and subj knodes if they exist
+        #     try:
+        #         param.knodes['var'].nodes = param.var_nodes
+        #         param.knodes['subj'].nodes = param.subj_nodes
+        #     except AttributeError:
+        #         pass
 
         return self.nodes
 
@@ -967,7 +960,7 @@ class Hierarchical(object):
         if knode is None:
             return None
         else:
-            return knode.stoch(name, **knode.args)
+            return knode.__class__(name, **knode.parents)
 
     def init_from_existing_model(self, pre_model, step_method, **kwargs):
         """
